@@ -575,7 +575,7 @@ def save_video(
     A fixed reset seed (``cfg.seed + 99_999``) is used so the video episode
     is consistent across checkpoints and can be compared directly.
     """
-    from PIL import Image as PILImage
+    import imageio
 
     q_network.eval()
     obs, _ = render_env.reset(seed=cfg.seed + 99_999)
@@ -583,7 +583,7 @@ def save_video(
     frames = []
     frame = render_env.render()
     if frame is not None:
-        frames.append(PILImage.fromarray(frame))
+        frames.append(frame)
 
     terminated = truncated = False
     with torch.no_grad():
@@ -592,7 +592,7 @@ def save_video(
             obs, _, terminated, truncated, _ = render_env.step(action)
             frame = render_env.render()
             if frame is not None:
-                frames.append(PILImage.fromarray(frame))
+                frames.append(frame)
 
     q_network.train()
 
@@ -600,15 +600,8 @@ def save_video(
         return
 
     video_dir.mkdir(parents=True, exist_ok=True)
-    path = video_dir / f"step_{step:09d}.gif"
-    ms_per_frame = 1000 // cfg.video_fps
-    frames[0].save(
-        path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=ms_per_frame,
-        loop=0,
-    )
+    path = video_dir / f"step_{step:09d}.mp4"
+    imageio.mimwrite(path, frames, fps=cfg.video_fps, codec="libx264", quality=7)
     print(f"  [VIDEO] {len(frames)} frames → {path.relative_to(path.parents[2])}")
 
 

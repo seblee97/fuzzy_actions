@@ -3,4 +3,4 @@ runs/
 .venv/
 *.pyc
 *.pt
-*.gif
+*.mp4
