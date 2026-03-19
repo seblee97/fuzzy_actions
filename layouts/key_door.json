@@ -1,0 +1,11 @@
+{
+    "default_correct_keys": {
+        "3,3": "red"
+    },
+    "protected_rewards": {
+        "3,3": ["5,5"]
+    },
+    "reward_values": {
+        "5,5": 1.0
+    }
+}
