@@ -126,6 +126,8 @@ class Config:
     run_name: str = ""
     save_frequency: int = 100_000  # 0 = save best + final only
     runs_dir: str = "runs"
+    save_video: bool = True   # save a GIF rollout at each eval checkpoint
+    video_fps: int = 10       # playback speed of saved videos
 
 
 def parse_args() -> Config:
@@ -186,6 +188,8 @@ def parse_args() -> Config:
     p.add_argument("--run-name", default=cfg.run_name)
     p.add_argument("--save-frequency", type=int, default=cfg.save_frequency)
     p.add_argument("--runs-dir", default=cfg.runs_dir)
+    p.add_argument("--no-save-video", dest="save_video", action="store_false", default=cfg.save_video)
+    p.add_argument("--video-fps", type=int, default=cfg.video_fps)
 
     args = p.parse_args()
     cfg.n_rooms = args.n_rooms
@@ -219,6 +223,8 @@ def parse_args() -> Config:
     cfg.run_name = args.run_name
     cfg.save_frequency = args.save_frequency
     cfg.runs_dir = args.runs_dir
+    cfg.save_video = args.save_video
+    cfg.video_fps = args.video_fps
     return cfg
 
 
@@ -340,6 +346,11 @@ def train(cfg: Config) -> None:
     # ------------------------------------------------------------------
     env = make_modular_env(layout_seed=cfg.seed, **_env_kwargs(cfg))
     eval_env = make_modular_env(layout_seed=cfg.seed, **_env_kwargs(cfg))
+    # Separate env for video: same layout + wrappers, but render_mode="rgb_array"
+    # so render() returns the full-colour scene (not the preprocessed obs).
+    render_env = make_modular_env(
+        layout_seed=cfg.seed, render_mode="rgb_array", **_env_kwargs(cfg)
+    ) if cfg.save_video else None
     obs_space = env.observation_space
     n_actions = env.action_space.n
     local_obs_shape: tuple = obs_space["obs"].shape       # (H, W, 3)
@@ -497,6 +508,13 @@ def train(cfg: Config) -> None:
                     _save_checkpoint(q_network, optimizer, global_step, cfg, run_dir / "best.pt")
                     print(f"  [BEST] {best_eval_return:+.3f}")
 
+                if render_env is not None:
+                    save_video(
+                        cfg, render_env, q_network, device,
+                        step=global_step,
+                        video_dir=run_dir / "videos",
+                    )
+
             # ---- Periodic checkpoint ---------------------------------
             if cfg.save_frequency > 0 and global_step % cfg.save_frequency == 0:
                 _save_checkpoint(
@@ -527,6 +545,8 @@ def train(cfg: Config) -> None:
     writer.close()
     env.close()
     eval_env.close()
+    if render_env is not None:
+        render_env.close()
 
     elapsed = time.time() - start_time
     print(f"\nTraining complete in {elapsed:.1f}s ({cfg.total_timesteps / elapsed:.0f} sps)")
@@ -537,6 +557,60 @@ def train(cfg: Config) -> None:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+def save_video(
+    cfg: Config,
+    render_env,
+    q_network: TwoStreamQNetwork,
+    device: torch.device,
+    step: int,
+    video_dir: Path,
+) -> None:
+    """Run one greedy episode on *render_env* and save all frames as a GIF.
+
+    *render_env* must have been created with ``render_mode="rgb_array"`` so
+    that ``env.render()`` returns an RGB numpy array.  The resulting GIF is
+    written to ``video_dir/step_{step:09d}.gif``.
+
+    A fixed reset seed (``cfg.seed + 99_999``) is used so the video episode
+    is consistent across checkpoints and can be compared directly.
+    """
+    from PIL import Image as PILImage
+
+    q_network.eval()
+    obs, _ = render_env.reset(seed=cfg.seed + 99_999)
+
+    frames = []
+    frame = render_env.render()
+    if frame is not None:
+        frames.append(PILImage.fromarray(frame))
+
+    terminated = truncated = False
+    with torch.no_grad():
+        while not (terminated or truncated):
+            action = _forward(q_network, obs, device).argmax(dim=1).item()
+            obs, _, terminated, truncated, _ = render_env.step(action)
+            frame = render_env.render()
+            if frame is not None:
+                frames.append(PILImage.fromarray(frame))
+
+    q_network.train()
+
+    if not frames:
+        return
+
+    video_dir.mkdir(parents=True, exist_ok=True)
+    path = video_dir / f"step_{step:09d}.gif"
+    ms_per_frame = 1000 // cfg.video_fps
+    frames[0].save(
+        path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=ms_per_frame,
+        loop=0,
+    )
+    print(f"  [VIDEO] {len(frames)} frames → {path.relative_to(path.parents[2])}")
+
 
 def _save_checkpoint(
     q_network: TwoStreamQNetwork,
