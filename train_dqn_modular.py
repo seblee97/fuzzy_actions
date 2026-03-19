@@ -63,8 +63,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
+import gymnasium
+
 from fuzzy_actions import (
-    DictReplayBuffer,
+    FramedDictReplayBuffer,
     TwoStreamQNetwork,
     linear_schedule,
     make_modular_env,
@@ -348,7 +350,6 @@ def train(cfg: Config) -> None:
         f"local_obs={local_obs_shape}  "
         f"map_obs={map_obs_shape}"
     )
-    _print_memory_estimate(cfg, obs_space)
 
     # ------------------------------------------------------------------
     # Networks
@@ -381,13 +382,25 @@ def train(cfg: Config) -> None:
     # ------------------------------------------------------------------
     # Replay buffer
     # ------------------------------------------------------------------
-    # Derived seed keeps buffer sampling RNG independent from env/torch.
-    replay_buffer = DictReplayBuffer(
-        obs_space=obs_space,
+    # Derive the single-frame space (H, W, 1) by dividing channel count by
+    # n_stack — FramedDictReplayBuffer stores one frame per transition instead
+    # of full stacks for both obs and next_obs (8× smaller for n_stack=4).
+    single_frame_space = gymnasium.spaces.Dict({
+        k: gymnasium.spaces.Box(
+            low=0, high=255,
+            shape=(*space.shape[:2], space.shape[2] // cfg.n_stack),
+            dtype=space.dtype,
+        )
+        for k, space in obs_space.spaces.items()
+    })
+    replay_buffer = FramedDictReplayBuffer(
+        single_frame_space=single_frame_space,
         buffer_size=cfg.buffer_size,
+        n_stack=cfg.n_stack,
         device=device,
         seed=cfg.seed + 1,
     )
+    _print_memory_estimate(cfg, single_frame_space)
 
     # ------------------------------------------------------------------
     # Training loop
@@ -404,6 +417,7 @@ def train(cfg: Config) -> None:
         # Same layout every episode; vary the reset seed so the agent's
         # starting position (and any other stochastic init) differs.
         obs, _ = env.reset(seed=cfg.seed + ep_count)
+        replay_buffer.on_reset()
         ep_count += 1
         ep_return, ep_length = 0.0, 0
         terminated = truncated = False
@@ -433,7 +447,7 @@ def train(cfg: Config) -> None:
             # Store transition (note: use terminated, not done, for the
             # bootstrap mask — truncation does NOT mean the episode ended
             # in a terminal state).
-            replay_buffer.add(obs, action, reward, next_obs, terminated)
+            replay_buffer.add(obs, action, reward, terminated, truncated)
             obs = next_obs
 
             # ---- Gradient update -------------------------------------
@@ -548,17 +562,17 @@ def _save_config(cfg: Config, path: Path) -> None:
             f.write(f"{k} = {v!r}\n")
 
 
-def _print_memory_estimate(cfg: Config, obs_space) -> None:
-    """Print an estimate of replay buffer memory usage."""
+def _print_memory_estimate(cfg: Config, single_frame_space) -> None:
+    """Print replay buffer memory estimate (FramedDictReplayBuffer stores 1 frame/transition)."""
     bytes_per_transition = sum(
         np.prod(s.shape) * np.dtype(s.dtype).itemsize
-        for s in obs_space.spaces.values()
-    ) * 2  # obs + next_obs
+        for s in single_frame_space.spaces.values()
+    )  # 1 frame per stream, no obs+next_obs duplication
     total_gb = cfg.buffer_size * bytes_per_transition / 1e9
     print(
         f"Replay buffer memory estimate: "
         f"{cfg.buffer_size:,} × {bytes_per_transition / 1024:.1f} KB "
-        f"= {total_gb:.2f} GB"
+        f"= {total_gb:.2f} GB  (FramedDictReplayBuffer, {cfg.n_stack}× smaller than naive)"
     )
 
 
