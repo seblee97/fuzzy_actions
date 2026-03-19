@@ -325,7 +325,7 @@ def train(cfg: Config) -> None:
     # ------------------------------------------------------------------
     if not cfg.run_name:
         cfg.run_name = (
-            f"dqn_modular_r{cfg.n_rooms}_seed{cfg.seed}_{int(time.time())}"
+            f"dqn_modular_r{cfg.n_rooms}_seed{cfg.seed}_{time.strftime('%Y-%m-%d-%H-%M-%S')}"
         )
     run_dir = Path(cfg.runs_dir) / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
