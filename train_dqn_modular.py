@@ -54,6 +54,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -332,6 +333,15 @@ def train(cfg: Config) -> None:
     _save_config(cfg, run_dir / "config.txt")
 
     writer = SummaryWriter(log_dir=str(run_dir))
+    metrics_path = run_dir / "metrics.jsonl"
+
+    def _log(event: str, step: int, data: dict) -> None:
+        """Append one record to metrics.jsonl and write scalars to TensorBoard."""
+        for k, v in data.items():
+            writer.add_scalar(f"{event}/{k}", v, step)
+        with open(metrics_path, "a") as f:
+            f.write(json.dumps({"event": event, "step": step, **data}) + "\n")
+
     print(f"Run: {cfg.run_name}")
     print(f"Log dir: {run_dir}")
 
@@ -485,8 +495,10 @@ def train(cfg: Config) -> None:
                 torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=10.0)
                 optimizer.step()
 
-                writer.add_scalar("train/td_loss", loss.item(), global_step)
-                writer.add_scalar("train/q_values_mean", current_q.mean().item(), global_step)
+                _log("train", global_step, {
+                    "td_loss": loss.item(),
+                    "q_values_mean": current_q.mean().item(),
+                })
 
             # ---- Hard target network update --------------------------
             if global_step % cfg.target_update_frequency == 0:
@@ -495,8 +507,7 @@ def train(cfg: Config) -> None:
             # ---- Evaluation ------------------------------------------
             if global_step % cfg.eval_frequency == 0:
                 eval_stats = evaluate(cfg, eval_env, q_network, device)
-                for k, v in eval_stats.items():
-                    writer.add_scalar(f"eval/{k}", v, global_step)
+                _log("eval", global_step, eval_stats)
                 print(
                     f"  [EVAL] step={global_step:>9,}  "
                     f"return={eval_stats['mean_return']:+.3f}±{eval_stats['std_return']:.2f}  "
@@ -523,11 +534,13 @@ def train(cfg: Config) -> None:
                 )
 
         # ---- Episode bookkeeping -------------------------------------
-        writer.add_scalar("train/episode_return", ep_return, global_step)
-        writer.add_scalar("train/episode_length", ep_length, global_step)
-        writer.add_scalar("train/epsilon", epsilon, global_step)
-        writer.add_scalar("train/safes_opened", info.get("safes_opened", 0), global_step)
-        writer.add_scalar("train/buffer_size", len(replay_buffer), global_step)
+        _log("episode", global_step, {
+            "return": ep_return,
+            "length": ep_length,
+            "epsilon": epsilon,
+            "safes_opened": info.get("safes_opened", 0),
+            "buffer_size": len(replay_buffer),
+        })
 
         if ep_count % 20 == 0:
             sps = int(global_step / (time.time() - start_time))
