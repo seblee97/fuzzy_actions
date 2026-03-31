@@ -27,4 +27,4 @@ dev = [
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["fuzzy_actions"]
+packages = ["fuzzy_actions", "hierarchical"]
