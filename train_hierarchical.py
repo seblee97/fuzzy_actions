@@ -323,7 +323,7 @@ def save_sample_frames(
         s1, s2 = item["s1_a"], item["s2_a"]
         if s1.ndim != 3:
             # Latent / flat state — nothing to render
-            print("sample_frames: skipping (state is not a pixel tensor)")
+            print("sample_frames: skipping (state_mode is not 'pixel' — no frames to save)")
             return
         frames.append((s1, s2))
 
@@ -575,8 +575,11 @@ def train(cfg: Config) -> None:
                 p_a = predictor(z_proj_a)
                 c_loss = contrastive_loss_fn(p_a, z_proj_b)
 
-            # Forward loss
-            s2_pred = forward_model(enc_s1_a, z_a)
+            # Forward loss — only trains the forward model, not the encoder/inverse.
+            # enc_s1_a and z_a are detached so the encoder is shaped solely by
+            # the contrastive signal; the forward model learns to predict in
+            # whatever embedding space the contrastive loss has settled on.
+            s2_pred = forward_model(enc_s1_a.detach(), z_a.detach())
             f_loss = forward_loss_fn(s2_pred, enc_s2_a)
 
             total_loss = (

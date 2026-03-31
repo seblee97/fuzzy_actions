@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _mlp(dims: list[int]) -> nn.Sequential:
@@ -113,4 +114,4 @@ class StateEncoder(nn.Module):
             self._net = _EmbeddingEncoder(input_dim, embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._net(x)
+        return F.normalize(self._net(x), dim=-1)
