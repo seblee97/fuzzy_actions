@@ -6,3 +6,4 @@ runs/
 *.mp4
 *ipynb_checkpoints
 datasets/
+*DS_Store

@@ -286,6 +286,66 @@ def load_dataset(cfg: Config):
 
 
 # ---------------------------------------------------------------------------
+# Sample frame saving
+# ---------------------------------------------------------------------------
+
+def save_sample_frames(
+    dataset,
+    run_dir: Path,
+    n_pairs: int = 8,
+    seed: int = 0,
+) -> None:
+    """Save a contact sheet of sample (s1, s2) pairs to *run_dir/sample_frames.png*.
+
+    Only runs when the dataset produces pixel states (tensors with 3 dims).
+    Silently skips for latent/flat states since there is nothing to display.
+
+    Each row shows one pair: s1_a on the left, s2_a on the right, with a
+    narrow gap between them so the transition direction is clear.
+    """
+    import random as _random
+    from PIL import Image as _Image
+
+    rng = _random.Random(seed)
+    indices = rng.sample(range(len(dataset)), min(n_pairs, len(dataset)))
+
+    frames = []
+    for idx in indices:
+        item = dataset[idx]
+        s1, s2 = item["s1_a"], item["s2_a"]
+        if s1.ndim != 3:
+            # Latent / flat state — nothing to render
+            print("sample_frames: skipping (state is not a pixel tensor)")
+            return
+        frames.append((s1, s2))
+
+    if not frames:
+        return
+
+    # Convert (C, H, W) float [0,1] → (H, W, C) uint8
+    def to_uint8(t):
+        return (t.permute(1, 2, 0).clamp(0.0, 1.0).mul(255).byte().numpy())
+
+    gap = 4  # pixel gap between s1 and s2 within a pair
+    row_gap = 2  # pixel gap between rows
+    sample_h, sample_w = to_uint8(frames[0][0]).shape[:2]
+    sheet_w = sample_w * 2 + gap
+    sheet_h = len(frames) * sample_h + (len(frames) - 1) * row_gap
+
+    sheet = (
+        255 * __import__("numpy").ones((sheet_h, sheet_w, 3), dtype="uint8")
+    )
+    for row, (s1, s2) in enumerate(frames):
+        y = row * (sample_h + row_gap)
+        sheet[y : y + sample_h, :sample_w] = to_uint8(s1)
+        sheet[y : y + sample_h, sample_w + gap :] = to_uint8(s2)
+
+    out_path = run_dir / "sample_frames.png"
+    _Image.fromarray(sheet).save(out_path)
+    print(f"Sample frames saved → {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Checkpointing
 # ---------------------------------------------------------------------------
 
@@ -362,6 +422,7 @@ def train(cfg: Config) -> None:
         drop_last=True,
     )
     print(f"Dataset: {len(dataset):,} samples  |  {len(loader):,} batches/epoch")
+    save_sample_frames(dataset, run_dir, seed=cfg.seed)
 
     # Auto-detect input shape from dataset
     if cfg.encoder_mode == "latent" and hasattr(dataset, "state_dim") and dataset.state_dim is not None:

@@ -84,6 +84,7 @@ class PairDataset(Dataset, ABC):
         root: str | None = None,
         maze_dataset: MazeOracleDataset | None = None,
         state_mode: str = "latent",
+        pixel_style: str = "game",
         min_group_size: int = 2,
         seed: int = 42,
     ):
@@ -91,13 +92,17 @@ class PairDataset(Dataset, ABC):
         assert state_mode in ("latent", "pixel"), (
             f"state_mode must be 'latent' or 'pixel'; got '{state_mode}'"
         )
+        assert pixel_style in ("game", "raw"), (
+            f"pixel_style must be 'game' or 'raw'; got '{pixel_style}'"
+        )
         self.state_mode = state_mode
+        self.pixel_style = pixel_style
         variant = "full" if state_mode == "pixel" else "actions_only"
 
         if maze_dataset is not None:
             self.ds = maze_dataset
         elif root is not None:
-            self.ds = MazeOracleDataset(root=root, variant=variant)
+            self.ds = MazeOracleDataset(root=root, variant=variant, pixel_style=pixel_style)
         else:
             raise ValueError("Provide either 'root' or 'maze_dataset'.")
         self.min_group_size = min_group_size
@@ -322,6 +327,7 @@ class WindowPairDataset(PairDataset):
         root: str | None = None,
         maze_dataset: MazeOracleDataset | None = None,
         state_mode: str = "latent",
+        pixel_style: str = "game",
         window_len: int = 10,
         stride: int | None = None,
         min_group_size: int = 2,
@@ -331,7 +337,7 @@ class WindowPairDataset(PairDataset):
         self._stride = stride if stride is not None else window_len
         super().__init__(
             root=root, maze_dataset=maze_dataset, state_mode=state_mode,
-            min_group_size=min_group_size, seed=seed,
+            pixel_style=pixel_style, min_group_size=min_group_size, seed=seed,
         )
 
     def _build_index(self) -> list[tuple[int, int, int]]:

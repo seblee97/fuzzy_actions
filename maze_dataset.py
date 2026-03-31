@@ -73,14 +73,19 @@ class MazeOracleDataset(Dataset):
         root: str | Path,
         variant: str = "actions_only",
         seq_len: int | None = None,
+        pixel_style: str = "game",
     ):
         super().__init__()
         root = Path(root)
         assert variant in ("actions_only", "full"), (
             f"variant must be 'actions_only' or 'full', got '{variant}'"
         )
+        assert pixel_style in ("game", "raw"), (
+            f"pixel_style must be 'game' or 'raw'; got '{pixel_style}'"
+        )
         self.root = root
         self.variant = variant
+        self.pixel_style = pixel_style
 
         # Load metadata
         with open(root / "metadata.json") as f:
@@ -159,6 +164,7 @@ class MazeOracleDataset(Dataset):
                     room_h=meta["room_h"],
                     room_w=meta["room_w"],
                     seq_len=meta["seq_len"],
+                    pixel_render_style=self.pixel_style,
                 )
             return self._pixel_env
 
@@ -193,6 +199,7 @@ class MazeOracleDataset(Dataset):
                 global_map_mode="image",
                 max_steps=meta["seq_len"] + 10,
                 terminate_on_all_safes_opened=False,
+                pixel_render_style=self.pixel_style,
             )
 
         return self._variant_envs[variant_id]
@@ -204,7 +211,7 @@ class MazeOracleDataset(Dataset):
     @property
     def pixels_cached(self) -> bool:
         """True if the full pixel cache exists on disk."""
-        cache = self.root / "pixel_cache"
+        cache = self.root / f"pixel_cache_{self.pixel_style}"
         return (
             (cache / "room_pixels.npy").exists()
             and (cache / "map_images.npy").exists()
@@ -219,7 +226,7 @@ class MazeOracleDataset(Dataset):
         """
         from gridworld_env.replay import replay_trajectory
 
-        cache = self.root / "pixel_cache"
+        cache = self.root / f"pixel_cache_{self.pixel_style}"
         cache.mkdir(parents=True, exist_ok=True)
 
         # Determine pixel shapes from a dummy env
@@ -298,7 +305,7 @@ class MazeOracleDataset(Dataset):
                   file=sys.stderr)
             self.prepare_pixels()
 
-        cache = self.root / "pixel_cache"
+        cache = self.root / f"pixel_cache_{self.pixel_style}"
         self._pixel_cache_dir  = cache
         self._room_pixels_mmap = np.load(str(cache / "room_pixels.npy"), mmap_mode="r")
         self._map_images_mmap  = np.load(str(cache / "map_images.npy"),  mmap_mode="r")
