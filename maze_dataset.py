@@ -76,6 +76,7 @@ class MazeOracleDataset(Dataset):
         pixel_style: str = "game",
         obs_cell_size: int = 8,
         max_trajs: int | None = None,
+        resize: tuple[int, int] | None = None,
     ):
         super().__init__()
         root = Path(root)
@@ -89,6 +90,7 @@ class MazeOracleDataset(Dataset):
         self.variant = variant
         self.pixel_style = pixel_style
         self.obs_cell_size = obs_cell_size
+        self.resize = resize  # (H_out, W_out) applied at cache-build time, or None
 
         # Load metadata
         with open(root / "metadata.json") as f:
@@ -139,6 +141,25 @@ class MazeOracleDataset(Dataset):
         self._pixel_cache_dir: Optional[Path] = None
         self._room_pixels_mmap: Optional[np.ndarray] = None
         self._map_images_mmap:  Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Pickling support (multiprocessing DataLoader workers)
+    # ------------------------------------------------------------------
+
+    def __getstate__(self):
+        # File handles and env objects are not picklable across worker processes.
+        # Workers reopen / recreate them lazily on first access.
+        state = self.__dict__.copy()
+        state["_room_pixels_mmap"] = None
+        state["_map_images_mmap"] = None
+        state["_pixel_cache_dir"] = None
+        # NpzFile wraps a BufferedReader — not picklable
+        state["_variant_data"] = None
+        # Env objects (pygame surfaces etc.) are not picklable
+        state["_variant_envs"] = {}
+        if "_pixel_env" in state:
+            state["_pixel_env"] = None
+        return state
 
     # ------------------------------------------------------------------
     # Seed helper
@@ -229,6 +250,8 @@ class MazeOracleDataset(Dataset):
     def _pixel_cache_path(self) -> Path:
         """Directory where pixel frames are cached for this configuration."""
         name = f"pixel_cache_{self.pixel_style}_cs{self.obs_cell_size}"
+        if self.resize is not None:
+            name += f"_r{self.resize[0]}x{self.resize[1]}"
         if self.max_trajs is not None:
             name += f"_n{self.max_trajs}"
         return self.root / name
@@ -261,6 +284,16 @@ class MazeOracleDataset(Dataset):
         local_shape = obs["obs"].shape       # (H, W, 3)
         map_shape   = obs["map_image"].shape # (mH, mW, 3)
 
+        # If resizing, stored shape differs from rendered shape
+        if self.resize is not None:
+            import torch
+            import torch.nn.functional as _F
+            stored_local_shape = (*self.resize, 3)
+            stored_map_shape   = (*self.resize, 3)
+        else:
+            stored_local_shape = local_shape
+            stored_map_shape   = map_shape
+
         N, T = self.n_trajs, self.stored_seq_len
 
         # Create or open memmaps
@@ -273,11 +306,11 @@ class MazeOracleDataset(Dataset):
         else:
             room_pixels = np.lib.format.open_memmap(
                 str(rp_path), mode="w+", dtype=np.uint8,
-                shape=(N, T, *local_shape),
+                shape=(N, T, *stored_local_shape),
             )
             map_images = np.lib.format.open_memmap(
                 str(mi_path), mode="w+", dtype=np.uint8,
-                shape=(N, T, *map_shape),
+                shape=(N, T, *stored_map_shape),
             )
 
         # Sidecar tracking file
@@ -303,6 +336,15 @@ class MazeOracleDataset(Dataset):
             rp, mi = replay_trajectory(
                 env, traj_seed, self.start_positions[i], actions_np[i],
             )
+            if self.resize is not None:
+                def _resize_frames(frames):
+                    # frames: (T, H, W, 3) uint8 → resize → (T, H_out, W_out, 3) uint8
+                    t = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
+                    t = _F.interpolate(t, size=self.resize, mode="bilinear",
+                                       align_corners=False)
+                    return t.permute(0, 2, 3, 1).clamp(0, 255).byte().numpy()
+                rp = _resize_frames(rp)
+                mi = _resize_frames(mi)
             room_pixels[i] = rp
             map_images[i]  = mi
             rendered[i]    = True
