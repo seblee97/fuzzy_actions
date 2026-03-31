@@ -128,6 +128,7 @@ class PairDataset(Dataset, ABC):
         pixel_style: str = "game",
         obs_cell_size: int = 8,
         max_trajs: int | None = None,
+        resize_obs: tuple[int, int] | None = None,
         min_group_size: int = 2,
         seed: int = 42,
     ):
@@ -141,6 +142,7 @@ class PairDataset(Dataset, ABC):
         self.state_mode = state_mode
         self.pixel_style = pixel_style
         self.obs_cell_size = obs_cell_size
+        self.resize_obs = resize_obs  # (H_out, W_out) or None
         variant = "full" if state_mode == "pixel" else "actions_only"
 
         if maze_dataset is not None:
@@ -149,7 +151,7 @@ class PairDataset(Dataset, ABC):
             self.ds = MazeOracleDataset(
                 root=root, variant=variant,
                 pixel_style=pixel_style, obs_cell_size=obs_cell_size,
-                max_trajs=max_trajs,
+                max_trajs=max_trajs, resize=resize_obs,
             )
         else:
             raise ValueError("Provide either 'root' or 'maze_dataset'.")
@@ -169,6 +171,8 @@ class PairDataset(Dataset, ABC):
             self.ds.prepare_pixels()
             self.ds._ensure_pixel_cache()
             H, W, C = self.ds._room_pixels_mmap[0, 0].shape
+            if resize_obs is not None:
+                H, W = resize_obs
             self.pixel_shape = (C, H, W)
             self.state_dim = None
 
@@ -225,6 +229,7 @@ class PairDataset(Dataset, ABC):
         """
         if self.state_mode == "pixel":
             import numpy as np
+            self.ds._ensure_pixel_cache()
             frame = np.array(self.ds._room_pixels_mmap[traj_idx, t])
             return torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
         phase = self.ds.phase_labels[traj_idx, t]
@@ -367,6 +372,7 @@ class WindowPairDataset(PairDataset):
         pixel_style: str = "game",
         obs_cell_size: int = 8,
         max_trajs: int | None = None,
+        resize_obs: tuple[int, int] | None = None,
         window_len: int = 10,
         stride: int | None = None,
         min_group_size: int = 2,
@@ -377,7 +383,8 @@ class WindowPairDataset(PairDataset):
         super().__init__(
             root=root, maze_dataset=maze_dataset, state_mode=state_mode,
             pixel_style=pixel_style, obs_cell_size=obs_cell_size,
-            max_trajs=max_trajs, min_group_size=min_group_size, seed=seed,
+            max_trajs=max_trajs, resize_obs=resize_obs,
+            min_group_size=min_group_size, seed=seed,
         )
 
     def _build_index(self) -> list[tuple]:
