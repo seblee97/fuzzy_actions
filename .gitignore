@@ -4,3 +4,5 @@ runs/
 *.pyc
 *.pt
 *.mp4
+*ipynb_checkpoints
+datasets/
