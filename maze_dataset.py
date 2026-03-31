@@ -74,6 +74,8 @@ class MazeOracleDataset(Dataset):
         variant: str = "actions_only",
         seq_len: int | None = None,
         pixel_style: str = "game",
+        obs_cell_size: int = 8,
+        max_trajs: int | None = None,
     ):
         super().__init__()
         root = Path(root)
@@ -86,6 +88,7 @@ class MazeOracleDataset(Dataset):
         self.root = root
         self.variant = variant
         self.pixel_style = pixel_style
+        self.obs_cell_size = obs_cell_size
 
         # Load metadata
         with open(root / "metadata.json") as f:
@@ -101,6 +104,18 @@ class MazeOracleDataset(Dataset):
         self.start_positions  = npz["start_positions"]                # (N, 2) int16
 
         self.n_trajs, self.stored_seq_len = self.actions.shape
+
+        # Optionally limit to a prefix of trajectories
+        if max_trajs is not None and max_trajs < self.n_trajs:
+            self.actions          = self.actions[:max_trajs]
+            self.phase_labels     = self.phase_labels[:max_trajs]
+            self.material_labels  = self.material_labels[:max_trajs]
+            self.room_labels      = self.room_labels[:max_trajs]
+            self.completion_steps = self.completion_steps[:max_trajs]
+            self.start_positions  = self.start_positions[:max_trajs]
+            self.n_trajs          = max_trajs
+        self.max_trajs = max_trajs  # None means "all"
+
         self.seq_len = seq_len or self.stored_seq_len
         assert self.seq_len <= self.stored_seq_len
 
@@ -111,7 +126,7 @@ class MazeOracleDataset(Dataset):
         # --- Distribution dataset detection --------------------------------
         self.is_distribution = (root / "variants.npz").exists()
         if self.is_distribution:
-            self.variant_ids         = npz["variant_ids"]              # (N,) int32
+            self.variant_ids         = npz["variant_ids"][:self.n_trajs]  # (N,) int32
             self.n_trajs_per_variant = self.metadata["n_trajs_per_variant"]
             self._variant_data: Optional[np.lib.npyio.NpzFile] = None
             self._variant_envs: Dict[int, object] = {}                 # vid -> pixel env
@@ -165,6 +180,7 @@ class MazeOracleDataset(Dataset):
                     room_w=meta["room_w"],
                     seq_len=meta["seq_len"],
                     pixel_render_style=self.pixel_style,
+                    obs_cell_size=self.obs_cell_size,
                 )
             return self._pixel_env
 
@@ -200,6 +216,7 @@ class MazeOracleDataset(Dataset):
                 max_steps=meta["seq_len"] + 10,
                 terminate_on_all_safes_opened=False,
                 pixel_render_style=self.pixel_style,
+                obs_cell_size=self.obs_cell_size,
             )
 
         return self._variant_envs[variant_id]
@@ -209,9 +226,17 @@ class MazeOracleDataset(Dataset):
     # ------------------------------------------------------------------
 
     @property
+    def _pixel_cache_path(self) -> Path:
+        """Directory where pixel frames are cached for this configuration."""
+        name = f"pixel_cache_{self.pixel_style}_cs{self.obs_cell_size}"
+        if self.max_trajs is not None:
+            name += f"_n{self.max_trajs}"
+        return self.root / name
+
+    @property
     def pixels_cached(self) -> bool:
-        """True if the full pixel cache exists on disk."""
-        cache = self.root / f"pixel_cache_{self.pixel_style}"
+        """True if the pixel cache for this configuration exists on disk."""
+        cache = self._pixel_cache_path
         return (
             (cache / "room_pixels.npy").exists()
             and (cache / "map_images.npy").exists()
@@ -226,7 +251,7 @@ class MazeOracleDataset(Dataset):
         """
         from gridworld_env.replay import replay_trajectory
 
-        cache = self.root / f"pixel_cache_{self.pixel_style}"
+        cache = self._pixel_cache_path
         cache.mkdir(parents=True, exist_ok=True)
 
         # Determine pixel shapes from a dummy env
@@ -305,7 +330,7 @@ class MazeOracleDataset(Dataset):
                   file=sys.stderr)
             self.prepare_pixels()
 
-        cache = self.root / f"pixel_cache_{self.pixel_style}"
+        cache = self._pixel_cache_path
         self._pixel_cache_dir  = cache
         self._room_pixels_mmap = np.load(str(cache / "room_pixels.npy"), mmap_mode="r")
         self._map_images_mmap  = np.load(str(cache / "map_images.npy"),  mmap_mode="r")

@@ -130,6 +130,9 @@ class Config:
     batch_size: int = 256
     seed: int = 42
 
+    # --- data fraction ---
+    data_fraction: float = 1.0          # use this fraction of the dataset (0 < f ≤ 1)
+
     # --- logging / saving ---
     run_name: str = ""
     runs_dir: str = "runs"
@@ -191,6 +194,10 @@ def parse_args() -> Config:
     p.add_argument("--batch-size", type=int, default=cfg.batch_size)
     p.add_argument("--seed", type=int, default=cfg.seed)
 
+    # data fraction
+    p.add_argument("--data-fraction", type=float, default=cfg.data_fraction,
+                   metavar="F", help="fraction of dataset to use, 0 < F ≤ 1")
+
     # logging
     p.add_argument("--run-name", default=cfg.run_name)
     p.add_argument("--runs-dir", default=cfg.runs_dir)
@@ -226,6 +233,7 @@ def parse_args() -> Config:
     cfg.epochs = args.epochs
     cfg.batch_size = args.batch_size
     cfg.seed = args.seed
+    cfg.data_fraction = args.data_fraction
     cfg.run_name = args.run_name
     cfg.runs_dir = args.runs_dir
     cfg.save_frequency = args.save_frequency
@@ -354,7 +362,8 @@ def save_checkpoint(
     inverse: InverseModel,
     forward_model: ForwardModel,
     predictor: Predictor | None,
-    ema: EMAUpdater | None,
+    target_encoder: StateEncoder | None,
+    target_inverse: InverseModel | None,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     cfg: Config,
@@ -367,7 +376,8 @@ def save_checkpoint(
             "inverse_state_dict": inverse.state_dict(),
             "forward_state_dict": forward_model.state_dict(),
             "predictor_state_dict": predictor.state_dict() if predictor else None,
-            "ema_state_dict": ema.target.state_dict() if ema else None,
+            "target_encoder_state_dict": target_encoder.state_dict() if target_encoder else None,
+            "target_inverse_state_dict": target_inverse.state_dict() if target_inverse else None,
             "optimizer_state_dict": optimizer.state_dict(),
             "config": cfg.__dict__,
         },
@@ -412,7 +422,19 @@ def train(cfg: Config) -> None:
     print(f"Device: {device}")
 
     # Dataset
-    dataset = load_dataset(cfg)
+    base_dataset = load_dataset(cfg)
+
+    if cfg.data_fraction < 1.0:
+        import random as _random
+        from torch.utils.data import Subset
+        n_full = len(base_dataset)
+        n_keep = max(1, int(n_full * cfg.data_fraction))
+        indices = _random.Random(cfg.seed).sample(range(n_full), n_keep)
+        dataset = Subset(base_dataset, indices)
+        print(f"Using {n_keep:,} / {n_full:,} samples ({cfg.data_fraction:.1%})")
+    else:
+        dataset = base_dataset
+
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
@@ -422,15 +444,15 @@ def train(cfg: Config) -> None:
         drop_last=True,
     )
     print(f"Dataset: {len(dataset):,} samples  |  {len(loader):,} batches/epoch")
-    save_sample_frames(dataset, run_dir, seed=cfg.seed)
+    save_sample_frames(base_dataset, run_dir, seed=cfg.seed)
 
     # Auto-detect input shape from dataset
-    if cfg.encoder_mode == "latent" and hasattr(dataset, "state_dim") and dataset.state_dim is not None:
-        if cfg.state_dim != dataset.state_dim:
-            print(f"Auto-setting state_dim={dataset.state_dim} from dataset (was {cfg.state_dim})")
-            cfg.state_dim = dataset.state_dim
-    elif cfg.encoder_mode == "pixel" and hasattr(dataset, "pixel_shape") and dataset.pixel_shape is not None:
-        C, *_ = dataset.pixel_shape
+    if cfg.encoder_mode == "latent" and hasattr(base_dataset, "state_dim") and base_dataset.state_dim is not None:
+        if cfg.state_dim != base_dataset.state_dim:
+            print(f"Auto-setting state_dim={base_dataset.state_dim} from dataset (was {cfg.state_dim})")
+            cfg.state_dim = base_dataset.state_dim
+    elif cfg.encoder_mode == "pixel" and hasattr(base_dataset, "pixel_shape") and base_dataset.pixel_shape is not None:
+        C, *_ = base_dataset.pixel_shape
         if cfg.pixel_channels != C:
             print(f"Auto-setting pixel_channels={C} from dataset (was {cfg.pixel_channels})")
             cfg.pixel_channels = C
@@ -596,14 +618,16 @@ def train(cfg: Config) -> None:
         # Checkpoint
         if cfg.save_frequency > 0 and (epoch + 1) % cfg.save_frequency == 0:
             save_checkpoint(
-                encoder, inverse, forward_model, predictor, ema,
+                encoder, inverse, forward_model, predictor,
+                target_encoder, target_inverse,
                 optimizer, epoch + 1, cfg,
                 run_dir / f"checkpoint_epoch{epoch + 1:04d}.pt",
             )
 
     # Final checkpoint
     save_checkpoint(
-        encoder, inverse, forward_model, predictor, ema,
+        encoder, inverse, forward_model, predictor,
+        target_encoder, target_inverse,
         optimizer, cfg.epochs, cfg,
         run_dir / "final.pt",
     )
