@@ -729,31 +729,79 @@ def train(cfg: Config) -> None:
 
             global_step = epoch * len(loader) + batch_idx
 
-            # --- Diagnostics (use last forward pass's z, x1, x2) ---
-            with torch.no_grad():
-                z_var = z.var(dim=0).mean().item()   # mean per-dim variance across batch
-                z_std = z.std(dim=0).mean().item()   # mean per-dim std
-
+            # --- Diagnostics (use last forward pass's tensors) ---
             if global_step % cfg.log_frequency == 0:
+                with torch.no_grad():
+                    # z stats
+                    z_std_per_dim = z.std(dim=0)                          # (z_dim,)
+                    z_var = z_std_per_dim.pow(2).mean().item()
+                    z_std = z_std_per_dim.mean().item()
+                    z_dead_frac = (z_std_per_dim < 0.01).float().mean().item()
+
+                    # z effective dimensionality (participation ratio)
+                    z_centered = z - z.mean(dim=0, keepdim=True)
+                    cov = z_centered.T @ z_centered / (z.shape[0] - 1)   # (D, D)
+                    eigvals = torch.linalg.eigvalsh(cov).clamp(min=0)
+                    z_eff_dim = eigvals.sum().pow(2) / (eigvals.pow(2).sum() + 1e-8)
+
+                    # Encoder health: x1-x2 cosine similarity
+                    x1_x2_cos = torch.nn.functional.cosine_similarity(x1, x2, dim=-1).mean().item()
+
+                    # x2_pred quality: cosine similarity with x2
+                    x2_pred_cos = torch.nn.functional.cosine_similarity(x2_pred, x2, dim=-1).mean().item()
+
+                    # z same-type vs different-type cosine similarity (requires z_pos)
+                    if z_pos is not None:
+                        z_same_cos = torch.nn.functional.cosine_similarity(z, z_pos, dim=-1).mean().item()
+                        z_diff_cos = torch.nn.functional.cosine_similarity(
+                            z, z_pos[torch.randperm(z_pos.shape[0], device=device)], dim=-1
+                        ).mean().item()
+                    else:
+                        z_same_cos = z_diff_cos = float("nan")
+
+                    # Prior quality: cosine similarity between z_prior and z
+                    if z_prior is not None:
+                        prior_z_cos = torch.nn.functional.cosine_similarity(z_prior, z, dim=-1).mean().item()
+                    else:
+                        prior_z_cos = float("nan")
+
+                    # Per-module gradient norms (from most recent backward)
+                    grad_norms = {}
+                    for mn, m in modules_dict.items():
+                        norms = [p.grad.norm().item() for p in m.parameters()
+                                 if p.grad is not None]
+                        grad_norms[f"grad_norm/{mn}"] = sum(norms) / len(norms) if norms else 0.0
+
                 total_val = sum(
                     w * batch_losses.get(n, 0.0)
                     for n, w, _, _ in loss_slots
                 )
                 _log("train", global_step, {
-                    "loss_fwd":   batch_losses.get("fwd",   0.0),
-                    "loss_inv":   batch_losses.get("inv",   0.0),
-                    "loss_prior": batch_losses.get("prior", 0.0),
-                    "loss_reg":   batch_losses.get("reg",   0.0),
-                    "total_loss": total_val,
-                    "z_var":      z_var,
-                    "z_std":      z_std,
+                    "loss_fwd":      batch_losses.get("fwd",   0.0),
+                    "loss_inv":      batch_losses.get("inv",   0.0),
+                    "loss_prior":    batch_losses.get("prior", 0.0),
+                    "loss_reg":      batch_losses.get("reg",   0.0),
+                    "total_loss":    total_val,
+                    # z
+                    "z_var":         z_var,
+                    "z_std":         z_std,
+                    "z_dead_frac":   z_dead_frac,
+                    "z_eff_dim":     z_eff_dim.item(),
+                    "z_same_cos":    z_same_cos,
+                    "z_diff_cos":    z_diff_cos,
+                    # encoder
+                    "x1_x2_cos":     x1_x2_cos,
+                    # forward model
+                    "x2_pred_cos":   x2_pred_cos,
+                    # prior
+                    "prior_z_cos":   prior_z_cos,
+                    **grad_norms,
                 })
 
             if (cfg.shuffle_test_frequency > 0
                     and global_step % cfg.shuffle_test_frequency == 0
                     and not isinstance(forward_loss_fn, NullForwardLoss)):
                 with torch.no_grad():
-                    # Recompute clean forward loss for reference
                     x1_d = encoder(s1)
                     x2_d = encoder(s2)
                     z_clean = inverse(x1_d, x2_d)
@@ -771,7 +819,7 @@ def train(cfg: Config) -> None:
                 _log("diag", global_step, {
                     "shuffle_fwd_clean": loss_clean,
                     "shuffle_fwd_shuf":  loss_shuf,
-                    "z_sensitivity":     z_sensitivity,  # > 0 means z matters
+                    "z_sensitivity":     z_sensitivity,
                 })
                 print(
                     f"  [shuffle test] step={global_step}  "
