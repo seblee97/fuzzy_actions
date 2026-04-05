@@ -1,0 +1,29 @@
+{
+  "n_variants": 50,
+  "n_trajs_per_variant": 600,
+  "n_total_trajs": 30000,
+  "seq_len": 150,
+  "n_rooms": 4,
+  "room_h": 9,
+  "room_w": 11,
+  "layout_seed": 0,
+  "distribution_seed": 42,
+  "epsilon": 0.1,
+  "noise_type": "uniform",
+  "completion_rate": 0.9998,
+  "mean_steps_to_complete": 94.93528705741149,
+  "median_steps_to_complete": 94.0,
+  "phase_names": [
+    "get_key",
+    "make_key",
+    "get_key_location",
+    "collect_reward",
+    "goto_next_room"
+  ],
+  "material_names": [
+    "none",
+    "diamond",
+    "ruby",
+    "sapphire"
+  ]
+}

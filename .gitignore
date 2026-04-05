@@ -5,5 +5,5 @@ runs/
 *.pt
 *.mp4
 *ipynb_checkpoints
-datasets/
+datasets/**/pixel_cache_*/
 *DS_Store
