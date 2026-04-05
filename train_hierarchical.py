@@ -126,13 +126,13 @@ class Config:
     inverse_loss_type: str = "null"     # "null" | "infonce"
     forward_loss_type: str = "mse"      # "null" | "mse"
     prior_loss_type: str = "mse"        # "null" | "mse"
-    reg_loss_type: str = "null"         # "null" | "l2"
+    reg_loss_type: str = "l2"           # "null" | "l2"
 
     # --- loss weights ---
     w_forward: float = 1.0
     w_inverse: float = 1.0
     w_prior: float = 1.0
-    w_reg: float = 0.0
+    w_reg: float = 1.0
 
     # --- loss-specific params ---
     # noise injected into z before the forward model (0 = disabled)
