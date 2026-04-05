@@ -1,23 +1,47 @@
 from hierarchical.models.encoder import StateEncoder
 from hierarchical.models.inverse import InverseModel
-from hierarchical.models.predictor import Predictor
-from hierarchical.models.forward import ForwardModel
+from hierarchical.models.forward import ForwardModel, NConditionedForwardModel
+from hierarchical.models.prior import Prior
 from hierarchical.models.decoder import SequenceDecoder
-from hierarchical.losses.infonce import InfoNCELoss
-from hierarchical.losses.simsiam import SimSiamLoss
-from hierarchical.losses.byol import BYOLLoss
-from hierarchical.losses.forward_loss import ForwardLoss
+
+from hierarchical.losses.base import (
+    AbstractInverseLoss,
+    AbstractForwardLoss,
+    AbstractPriorLoss,
+    AbstractRegLoss,
+)
+from hierarchical.losses.inverse_losses import NullInverseLoss, InfoNCEInverseLoss
+from hierarchical.losses.forward_losses import NullForwardLoss, MSEForwardLoss
+from hierarchical.losses.prior_losses import NullPriorLoss, MSEPriorLoss
+from hierarchical.losses.reg_losses import NullRegLoss, L2RegLoss
+
 from hierarchical.ema import EMAUpdater
 
 __all__ = [
+    # models
     "StateEncoder",
     "InverseModel",
-    "Predictor",
     "ForwardModel",
+    "NConditionedForwardModel",
+    "Prior",
     "SequenceDecoder",
-    "InfoNCELoss",
-    "SimSiamLoss",
-    "BYOLLoss",
-    "ForwardLoss",
+    # loss ABCs
+    "AbstractInverseLoss",
+    "AbstractForwardLoss",
+    "AbstractPriorLoss",
+    "AbstractRegLoss",
+    # inverse losses
+    "NullInverseLoss",
+    "InfoNCEInverseLoss",
+    # forward losses
+    "NullForwardLoss",
+    "MSEForwardLoss",
+    # prior losses
+    "NullPriorLoss",
+    "MSEPriorLoss",
+    # reg losses
+    "NullRegLoss",
+    "L2RegLoss",
+    # misc
     "EMAUpdater",
 ]

@@ -20,11 +20,7 @@ class InverseModel(nn.Module):
 
     Architecture::
 
-        [enc_s1 ; enc_s2]  →  MLP  →  z  →  projection head  →  z_proj
-
-    ``z`` is the latent action used downstream (forward model, decoder).
-    ``z_proj`` is the extra projection used *only* for contrastive losses
-    (following the SimCLR convention: projection head discarded at inference).
+        [x1 ; x2]  →  MLP  →  z
 
     Parameters
     ----------
@@ -33,12 +29,7 @@ class InverseModel(nn.Module):
     z_dim:
         Dimensionality of the latent action z.
     hidden_sizes:
-        MLP hidden layer sizes for the inverse network.
-        Defaults to ``[512, 256]``.
-    proj_hidden_dim:
-        Hidden size of the projection head.
-    proj_dim:
-        Output size of the projection head (contrastive embedding space).
+        MLP hidden layer sizes.  Defaults to ``[512, 256]``.
     """
 
     def __init__(
@@ -46,34 +37,28 @@ class InverseModel(nn.Module):
         embed_dim: int,
         z_dim: int,
         hidden_sizes: list[int] | None = None,
-        proj_hidden_dim: int = 256,
-        proj_dim: int = 128,
     ):
         super().__init__()
         hidden = hidden_sizes or [512, 256]
-        self.inverse = _mlp([2 * embed_dim] + hidden + [z_dim])
-        self.projector = nn.Sequential(
-            nn.Linear(z_dim, proj_hidden_dim),
-            nn.BatchNorm1d(proj_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(proj_hidden_dim, proj_dim),
-        )
+        self.net = _mlp([2 * embed_dim] + hidden + [z_dim])
 
     def forward(
-        self, enc_s1: torch.Tensor, enc_s2: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute (z, z_proj).
-
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
         Parameters
         ----------
-        enc_s1, enc_s2:
+        x1, x2:
             (B, embed_dim) encoded start / end states.
+        context:
+            Optional context tensor N — ignored by this implementation,
+            reserved for subclasses that condition on task/variant info.
 
         Returns
         -------
-        z:      (B, z_dim) latent action for downstream use.
-        z_proj: (B, proj_dim) projected representation for contrastive loss.
+        z: (B, z_dim) latent action.
         """
-        z = self.inverse(torch.cat([enc_s1, enc_s2], dim=-1))
-        z_proj = self.projector(z)
-        return z, z_proj
+        return self.net(torch.cat([x1, x2], dim=-1))

@@ -268,8 +268,10 @@ class PairDataset(Dataset, ABC):
         return {
             "s1_a": self._extract_state(traj_a, t1_a),
             "s2_a": self._extract_state(traj_a, t2_a),
+            "n_a":  torch.tensor(t2_a - t1_a, dtype=torch.float32),
             "s1_b": self._extract_state(traj_b, t1_b),
             "s2_b": self._extract_state(traj_b, t2_b),
+            "n_b":  torch.tensor(t2_b - t1_b, dtype=torch.float32),
         }
 
     # ------------------------------------------------------------------
@@ -404,3 +406,152 @@ class WindowPairDataset(PairDataset):
         phase = int(self.ds.phase_labels[traj_idx, src_start])
         room = int(self.ds.room_labels[traj_idx, src_start])
         return (phase, room)
+
+
+# ---------------------------------------------------------------------------
+# Simple transition datasets (no positive-pair structure)
+# For use with non-contrastive objectives (e.g. JEPA-style).
+# Returns {"s1": ..., "s2": ...} with no group filtering.
+# ---------------------------------------------------------------------------
+
+class TransitionDataset(Dataset):
+    """Base class for simple (s1, s2) transition datasets.
+
+    Unlike ``PairDataset``, there is no positive-pair sampling and no
+    ``min_group_size`` filtering — every transition in every trajectory is
+    included.  Returns ``{"s1": tensor, "s2": tensor}``.
+
+    Parameters
+    ----------
+    root:
+        Path passed to ``MazeOracleDataset``.
+    maze_dataset:
+        Pre-built ``MazeOracleDataset``.  Mutually exclusive with *root*.
+    state_mode:
+        ``"latent"`` or ``"pixel"``.
+    pixel_style:
+        ``"game"`` or ``"raw"``.
+    obs_cell_size:
+        Pixels per grid cell.
+    max_trajs:
+        Limit dataset to first *max_trajs* trajectories.
+    resize_obs:
+        ``(H, W)`` to resize pixel observations to, or ``None``.
+    seed:
+        RNG seed for reproducible timestep sampling within segments.
+    """
+
+    def __init__(
+        self,
+        root: str | None = None,
+        maze_dataset: MazeOracleDataset | None = None,
+        state_mode: str = "latent",
+        pixel_style: str = "game",
+        obs_cell_size: int = 8,
+        max_trajs: int | None = None,
+        resize_obs: tuple[int, int] | None = None,
+        seed: int = 42,
+    ):
+        super().__init__()
+        assert state_mode in ("latent", "pixel")
+        assert pixel_style in ("game", "raw")
+        self.state_mode = state_mode
+        self.resize_obs = resize_obs
+        variant = "full" if state_mode == "pixel" else "actions_only"
+
+        if maze_dataset is not None:
+            self.ds = maze_dataset
+        elif root is not None:
+            self.ds = MazeOracleDataset(
+                root=root, variant=variant,
+                pixel_style=pixel_style, obs_cell_size=obs_cell_size,
+                max_trajs=max_trajs, resize=resize_obs,
+            )
+        else:
+            raise ValueError("Provide either 'root' or 'maze_dataset'.")
+
+        self._rng = random.Random(seed)
+
+        n_rooms = self.ds.metadata["n_rooms"]
+        self.n_phases   = self.ds.n_phases
+        self.n_materials = self.ds.n_materials
+        self.n_rooms    = n_rooms
+
+        if state_mode == "latent":
+            self.state_dim  = self.n_phases + self.n_materials + n_rooms
+            self.pixel_shape = None
+        else:
+            self.ds.prepare_pixels()
+            self.ds._ensure_pixel_cache()
+            H, W, C = self.ds._room_pixels_mmap[0, 0].shape
+            self.pixel_shape = (C, H, W)
+            self.state_dim = None
+
+        self.index = self._build_index()
+
+    def _build_index(self) -> list[tuple]:
+        raise NotImplementedError
+
+    def _extract_state(self, traj_idx: int, t: int) -> torch.Tensor:
+        if self.state_mode == "pixel":
+            import numpy as np
+            self.ds._ensure_pixel_cache()
+            frame = np.array(self.ds._room_pixels_mmap[traj_idx, t])
+            return torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
+        phase    = self.ds.phase_labels[traj_idx, t]
+        material = self.ds.material_labels[traj_idx, t]
+        room     = self.ds.room_labels[traj_idx, t]
+        return torch.cat([
+            F.one_hot(phase,    self.n_phases).float(),
+            F.one_hot(material, self.n_materials).float(),
+            F.one_hot(room,     self.n_rooms).float(),
+        ])
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        traj_idx, src_lo, src_hi, dst_lo, dst_hi = self.index[idx]
+        t1 = self._rng.randint(src_lo, src_hi)
+        t2 = self._rng.randint(dst_lo, dst_hi)
+        return {
+            "s1": self._extract_state(traj_idx, t1),
+            "s2": self._extract_state(traj_idx, t2),
+            "n":  torch.tensor(t2 - t1, dtype=torch.float32),
+        }
+
+
+class PhaseTransitionDataset(TransitionDataset):
+    """Every phase-to-phase transition in every trajectory.
+
+    Segments by phase label; each consecutive (phase_A, phase_B) visit pair
+    is one index entry.  No filtering by group size.
+    """
+
+    def _build_index(self) -> list[tuple]:
+        index = []
+        for i in range(self.ds.n_trajs):
+            segments = _segment_by_label(self.ds.phase_labels[i])
+            for j in range(len(segments) - 1):
+                _, src_start, src_end = segments[j]
+                _, dst_start, dst_end = segments[j + 1]
+                index.append((i, src_start, src_end, dst_start, dst_end))
+        return index
+
+
+class RoomTransitionDataset(TransitionDataset):
+    """Every room-to-room transition in every trajectory.
+
+    Segments by room label; each consecutive (room_A, room_B) visit pair
+    is one index entry.  No filtering by group size.
+    """
+
+    def _build_index(self) -> list[tuple]:
+        index = []
+        for i in range(self.ds.n_trajs):
+            segments = _segment_by_label(self.ds.room_labels[i])
+            for j in range(len(segments) - 1):
+                _, src_start, src_end = segments[j]
+                _, dst_start, dst_end = segments[j + 1]
+                index.append((i, src_start, src_end, dst_start, dst_end))
+        return index
