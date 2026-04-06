@@ -674,6 +674,8 @@ def train(cfg: Config) -> None:
             # conflict that arises when optimizer.step() modifies parameters
             # between backward calls on the same graph.
             batch_losses: dict[str, float] = {}
+            # Track peak grad norm per module across all backward passes this batch
+            peak_grad_norms: dict[str, float] = {mn: 0.0 for mn in modules_dict}
 
             for name, w, fn, slot_cfg in active_slots:
                 for opt in optimizers.values():
@@ -711,6 +713,12 @@ def train(cfg: Config) -> None:
                 batch_losses[name] = l.item()
 
                 (w * l).backward()
+
+                # Capture grad norms before clip/step, take max across slots
+                for mn, m in modules_dict.items():
+                    norms = [p.grad.norm().item() for p in m.parameters() if p.grad is not None]
+                    if norms:
+                        peak_grad_norms[mn] = max(peak_grad_norms[mn], sum(norms) / len(norms))
 
                 update_params = [
                     p for mn in slot_cfg.updates if mn in modules_dict
@@ -765,12 +773,8 @@ def train(cfg: Config) -> None:
                     else:
                         prior_z_cos = float("nan")
 
-                    # Per-module gradient norms (from most recent backward)
-                    grad_norms = {}
-                    for mn, m in modules_dict.items():
-                        norms = [p.grad.norm().item() for p in m.parameters()
-                                 if p.grad is not None]
-                        grad_norms[f"grad_norm/{mn}"] = sum(norms) / len(norms) if norms else 0.0
+                    # Per-module peak gradient norms across all backward passes this batch
+                    grad_norms = {f"grad_norm/{mn}": v for mn, v in peak_grad_norms.items()}
 
                 total_val = sum(
                     w * batch_losses.get(n, 0.0)
