@@ -126,3 +126,36 @@ class AbstractRegLoss(nn.Module, ABC):
         -------
         Scalar loss.
         """
+
+
+class AbstractEncRegLoss(nn.Module, ABC):
+    """Regularisation loss applied to encoder embeddings (x1, x2).
+
+    Intended to prevent encoder collapse by directly penalising the
+    embedding distribution — e.g. a VICReg-style variance hinge.
+
+    The default grad config updates only the encoder.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        stop_grad: list[str] | None = None,
+    ) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        x1:
+            (B, embed_dim) encoder output for s1.
+        x2:
+            (B, embed_dim) encoder output for s2.
+        stop_grad:
+            Loss-internal names to detach.  Each implementation documents
+            the names it recognises.
+
+        Returns
+        -------
+        Scalar loss.
+        """

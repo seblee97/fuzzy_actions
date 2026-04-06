@@ -9,11 +9,13 @@ from hierarchical.losses.base import (
     AbstractForwardLoss,
     AbstractPriorLoss,
     AbstractRegLoss,
+    AbstractEncRegLoss,
 )
 from hierarchical.losses.inverse_losses import NullInverseLoss, InfoNCEInverseLoss
 from hierarchical.losses.forward_losses import NullForwardLoss, MSEForwardLoss
 from hierarchical.losses.prior_losses import NullPriorLoss, MSEPriorLoss
 from hierarchical.losses.reg_losses import NullRegLoss, L2RegLoss
+from hierarchical.losses.enc_reg_losses import NullEncRegLoss, VICRegVarLoss
 
 from hierarchical.ema import EMAUpdater
 
@@ -42,6 +44,11 @@ __all__ = [
     # reg losses
     "NullRegLoss",
     "L2RegLoss",
+    # enc reg losses
+    "NullEncRegLoss",
+    "VICRegVarLoss",
+    # loss ABCs
+    "AbstractEncRegLoss",
     # misc
     "EMAUpdater",
 ]

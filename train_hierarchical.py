@@ -69,9 +69,12 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from hierarchical import (
+    AbstractEncRegLoss,
     EMAUpdater,
     ForwardModel,
     NConditionedForwardModel,
+    NullEncRegLoss,
+    VICRegVarLoss,
     InfoNCEInverseLoss,
     InverseModel,
     L2RegLoss,
@@ -127,14 +130,19 @@ class Config:
     forward_loss_type: str = "mse"      # "null" | "mse"
     prior_loss_type: str = "mse"        # "null" | "mse"
     reg_loss_type: str = "l2"           # "null" | "l2"
+    enc_reg_loss_type: str = "null"     # "null" | "vicreg_var"
 
     # --- loss weights ---
     w_forward: float = 1.0
     w_inverse: float = 1.0
     w_prior: float = 1.0
     w_reg: float = 1.0
+    w_enc_reg: float = 1.0
 
     # --- loss-specific params ---
+    # enc_reg / vicreg_var
+    vicreg_target_std: float = 0.1   # target per-dim std for VICReg variance hinge
+
     # noise injected into z before the forward model (0 = disabled)
     z_noise_std: float = 0.0
     # forward/mse
@@ -210,6 +218,10 @@ class GradFlowConfig:
         updates=["inverse"],
         stop_grad=[],
     ))
+    enc_reg: LossSlotConfig = field(default_factory=lambda: LossSlotConfig(
+        updates=["encoder"],
+        stop_grad=[],
+    ))
 
 
 def _parse_grad_config(json_str: str) -> GradFlowConfig:
@@ -217,7 +229,7 @@ def _parse_grad_config(json_str: str) -> GradFlowConfig:
     if not json_str:
         return cfg
     data = json.loads(json_str)
-    for slot in ("forward", "inverse", "prior", "reg"):
+    for slot in ("forward", "inverse", "prior", "reg", "enc_reg"):
         if slot not in data:
             continue
         d = data[slot]
@@ -275,12 +287,15 @@ def parse_args() -> Config:
                    choices=["null", "mse"])
     p.add_argument("--reg-loss-type", default=cfg.reg_loss_type,
                    choices=["null", "l2"])
+    p.add_argument("--enc-reg-loss-type", default=cfg.enc_reg_loss_type,
+                   choices=["null", "vicreg_var"])
 
     # loss weights
     p.add_argument("--w-forward", type=float, default=cfg.w_forward)
     p.add_argument("--w-inverse", type=float, default=cfg.w_inverse)
     p.add_argument("--w-prior", type=float, default=cfg.w_prior)
     p.add_argument("--w-reg", type=float, default=cfg.w_reg)
+    p.add_argument("--w-enc-reg", type=float, default=cfg.w_enc_reg)
 
     # loss-specific
     p.add_argument("--forward-use-predictor", action=argparse.BooleanOptionalAction,
@@ -289,6 +304,8 @@ def parse_args() -> Config:
     p.add_argument("--inv-proj-dim", type=int, default=cfg.inv_proj_dim)
     p.add_argument("--inv-proj-hidden-dim", type=int, default=cfg.inv_proj_hidden_dim)
     p.add_argument("--temperature", type=float, default=cfg.temperature)
+    p.add_argument("--vicreg-target-std", type=float, default=cfg.vicreg_target_std,
+                   help="target per-dim std for VICReg variance hinge (enc_reg)")
     p.add_argument("--z-noise-std", type=float, default=cfg.z_noise_std,
                    help="std of Gaussian noise added to z before the forward model (0=off)")
 
@@ -337,10 +354,13 @@ def parse_args() -> Config:
     cfg.forward_loss_type     = args.forward_loss_type
     cfg.prior_loss_type       = args.prior_loss_type
     cfg.reg_loss_type         = args.reg_loss_type
+    cfg.enc_reg_loss_type     = args.enc_reg_loss_type
     cfg.w_forward             = args.w_forward
     cfg.w_inverse             = args.w_inverse
     cfg.w_prior               = args.w_prior
     cfg.w_reg                 = args.w_reg
+    cfg.w_enc_reg             = args.w_enc_reg
+    cfg.vicreg_target_std     = args.vicreg_target_std
     cfg.forward_use_predictor = args.forward_use_predictor
     cfg.forward_pred_hidden_dim = args.forward_pred_hidden_dim
     cfg.inv_proj_dim          = args.inv_proj_dim
@@ -404,10 +424,12 @@ def build_losses(cfg: Config) -> tuple[
     else:
         forward_loss = NullForwardLoss()
 
-    prior_loss = MSEPriorLoss() if cfg.prior_loss_type == "mse" else NullPriorLoss()
-    reg_loss   = L2RegLoss()    if cfg.reg_loss_type   == "l2"  else NullRegLoss()
+    prior_loss   = MSEPriorLoss()  if cfg.prior_loss_type   == "mse"        else NullPriorLoss()
+    reg_loss     = L2RegLoss()     if cfg.reg_loss_type     == "l2"         else NullRegLoss()
+    enc_reg_loss = VICRegVarLoss(target_std=cfg.vicreg_target_std) \
+                   if cfg.enc_reg_loss_type == "vicreg_var" else NullEncRegLoss()
 
-    return inverse_loss, forward_loss, prior_loss, reg_loss
+    return inverse_loss, forward_loss, prior_loss, reg_loss, enc_reg_loss
 
 
 # ---------------------------------------------------------------------------
@@ -590,9 +612,10 @@ def train(cfg: Config) -> None:
     )
 
     # Build losses (may contain trainable parameters)
-    inverse_loss_fn, forward_loss_fn, prior_loss_fn, reg_loss_fn = build_losses(cfg)
-    inverse_loss_fn = inverse_loss_fn.to(device)
-    forward_loss_fn = forward_loss_fn.to(device)
+    inverse_loss_fn, forward_loss_fn, prior_loss_fn, reg_loss_fn, enc_reg_loss_fn = build_losses(cfg)
+    inverse_loss_fn  = inverse_loss_fn.to(device)
+    forward_loss_fn  = forward_loss_fn.to(device)
+    enc_reg_loss_fn  = enc_reg_loss_fn.to(device)
 
     # Named module registry — keys are the valid names for `updates` in grad config
     modules_dict: dict[str, nn.Module] = {
@@ -620,12 +643,13 @@ def train(cfg: Config) -> None:
 
     # Loss slots: (short_name, weight, fn, slot_grad_config)
     # Null losses are skipped (no graph, no point doing backward)
-    _NULL_TYPES = (NullForwardLoss, NullInverseLoss, NullPriorLoss, NullRegLoss)
+    _NULL_TYPES = (NullForwardLoss, NullInverseLoss, NullPriorLoss, NullRegLoss, NullEncRegLoss)
     loss_slots = [
-        ("fwd",   cfg.w_forward,  forward_loss_fn,  grad_cfg.forward),
-        ("inv",   cfg.w_inverse,  inverse_loss_fn,  grad_cfg.inverse),
-        ("prior", cfg.w_prior,    prior_loss_fn,    grad_cfg.prior),
-        ("reg",   cfg.w_reg,      reg_loss_fn,      grad_cfg.reg),
+        ("fwd",     cfg.w_forward,  forward_loss_fn,  grad_cfg.forward),
+        ("inv",     cfg.w_inverse,  inverse_loss_fn,  grad_cfg.inverse),
+        ("prior",   cfg.w_prior,    prior_loss_fn,    grad_cfg.prior),
+        ("reg",     cfg.w_reg,      reg_loss_fn,      grad_cfg.reg),
+        ("enc_reg", cfg.w_enc_reg,  enc_reg_loss_fn,  grad_cfg.enc_reg),
     ]
     active_slots = [
         (name, w, fn, sc) for name, w, fn, sc in loss_slots
@@ -645,7 +669,7 @@ def train(cfg: Config) -> None:
         for m in modules_dict.values():
             m.train()
 
-        epoch_losses = {"fwd": 0.0, "inv": 0.0, "prior": 0.0, "reg": 0.0}
+        epoch_losses = {"fwd": 0.0, "inv": 0.0, "prior": 0.0, "reg": 0.0, "enc_reg": 0.0}
         t0 = time.time()
 
         for batch_idx, batch in enumerate(loader):
@@ -707,8 +731,10 @@ def train(cfg: Config) -> None:
                     l = fn(t["z"], t["z_pos"], stop_grad=sg)
                 elif name == "prior":
                     l = fn(t["z_prior"], t["z"], stop_grad=sg) if t["z_prior"] is not None else x1.new_tensor(0.0)
-                else:  # reg
+                elif name == "reg":
                     l = fn(t["z"], stop_grad=sg)
+                else:  # enc_reg
+                    l = fn(t["x1"], t["x2"], stop_grad=sg)
 
                 batch_losses[name] = l.item()
 
@@ -730,10 +756,11 @@ def train(cfg: Config) -> None:
                     if mn in optimizers:
                         optimizers[mn].step()
 
-            epoch_losses["fwd"]   += batch_losses.get("fwd",   0.0)
-            epoch_losses["inv"]   += batch_losses.get("inv",   0.0)
-            epoch_losses["prior"] += batch_losses.get("prior", 0.0)
-            epoch_losses["reg"]   += batch_losses.get("reg",   0.0)
+            epoch_losses["fwd"]     += batch_losses.get("fwd",     0.0)
+            epoch_losses["inv"]     += batch_losses.get("inv",     0.0)
+            epoch_losses["prior"]   += batch_losses.get("prior",   0.0)
+            epoch_losses["reg"]     += batch_losses.get("reg",     0.0)
+            epoch_losses["enc_reg"] += batch_losses.get("enc_reg", 0.0)
 
             global_step = epoch * len(loader) + batch_idx
 
@@ -781,10 +808,11 @@ def train(cfg: Config) -> None:
                     for n, w, _, _ in loss_slots
                 )
                 _log("train", global_step, {
-                    "loss_fwd":      batch_losses.get("fwd",   0.0),
-                    "loss_inv":      batch_losses.get("inv",   0.0),
-                    "loss_prior":    batch_losses.get("prior", 0.0),
-                    "loss_reg":      batch_losses.get("reg",   0.0),
+                    "loss_fwd":      batch_losses.get("fwd",     0.0),
+                    "loss_inv":      batch_losses.get("inv",     0.0),
+                    "loss_prior":    batch_losses.get("prior",   0.0),
+                    "loss_reg":      batch_losses.get("reg",     0.0),
+                    "loss_enc_reg":  batch_losses.get("enc_reg", 0.0),
                     "total_loss":    total_val,
                     # z
                     "z_var":         z_var,
@@ -839,6 +867,7 @@ def train(cfg: Config) -> None:
             f"inv={epoch_losses['inv']/n:.4f}  "
             f"prior={epoch_losses['prior']/n:.4f}  "
             f"reg={epoch_losses['reg']/n:.4f}  "
+            f"enc_reg={epoch_losses['enc_reg']/n:.4f}  "
             f"({elapsed:.1f}s)"
         )
         _log("epoch", epoch + 1, {k: v / n for k, v in epoch_losses.items()})

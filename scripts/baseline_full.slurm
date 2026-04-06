@@ -19,6 +19,8 @@ RESULTS="/mnt/home/slee1/ceph/fuzzy_actions"
 
 source "$VENV"
 
+export SDL_AUDIODRIVER=dummy
+
 mkdir -p "$REPO/logs"
 mkdir -p "$RESULTS"
 
@@ -34,6 +36,9 @@ python train_hierarchical.py \
     --prior-loss-type mse \
     --forward-model-type n_conditioned \
     --z-noise-std 0.1 \
+    --no-forward-use-predictor \
+    --enc-reg-loss-type vicreg_var \
+    --vicreg-target-std 0.1 \
     --grad-config '{"inverse": {"stop_grad": ["keys"]}}' \
     --epochs 100 \
     --batch-size 256 \
