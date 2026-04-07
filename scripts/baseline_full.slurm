@@ -39,7 +39,8 @@ python train_hierarchical.py \
     --no-forward-use-predictor \
     --enc-reg-loss-type vicreg_var \
     --vicreg-target-std 0.1 \
-    --grad-config '{"inverse": {"stop_grad": ["keys"]}}' \
+    --w-enc-reg 25.0 \
+    --grad-config '{"forward": {"updates": ["inverse", "forward", "forward_loss"], "stop_grad": ["x2"]}, "inverse": {"stop_grad": ["keys"]}}' \
     --epochs 100 \
     --batch-size 256 \
     --num-workers 8 \
