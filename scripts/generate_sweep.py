@@ -197,8 +197,11 @@ if __name__ == "__main__":
         write_slurm(configs, slurm_path)
         if args.submit:
             result = subprocess.run(
-                ["sbatch", str(slurm_path)], capture_output=True, text=True
+                ["sbatch", str(slurm_path)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
+            result.stdout = result.stdout.decode()
+            result.stderr = result.stderr.decode()
             print(result.stdout.strip())
             if result.returncode != 0:
                 print(result.stderr.strip())
