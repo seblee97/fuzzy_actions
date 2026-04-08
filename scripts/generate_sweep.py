@@ -6,8 +6,6 @@ Usage:
     python scripts/generate_sweep.py --submit  # write configs + slurm script + sbatch
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import subprocess
@@ -57,7 +55,7 @@ GRID = {
 # ---------------------------------------------------------------------------
 
 
-def _grid_configs() -> list[dict]:
+def _grid_configs():
     keys = list(GRID.keys())
     configs = []
     for values in product(*[GRID[k] for k in keys]):
