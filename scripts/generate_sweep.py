@@ -96,6 +96,8 @@ def _config_name(cfg: dict, idx: int) -> str:
 # Output
 # ---------------------------------------------------------------------------
 
+# LAST_IDX is replaced by write_slurm() — do NOT use .format() on this string
+# because the heredoc contains { } characters that would confuse str.format.
 SLURM_HEADER = """\
 #!/bin/bash
 #SBATCH --job-name=hier_sweep
@@ -108,7 +110,7 @@ SLURM_HEADER = """\
 #SBATCH --mem=64G
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --array=0-{last_idx}
+#SBATCH --array=0-LAST_IDX
 
 set -e
 
@@ -122,18 +124,44 @@ source "$VENV"
 export SDL_AUDIODRIVER=dummy
 
 mkdir -p "$REPO/logs"
-mkdir -p "$RESULTS"
+mkdir -p "$RESULTS/runs"
 
 cd "$REPO"
 
-# Read the config file for this array task
 CONFIG_FILE="$SWEEP_DIR/config_$(printf '%03d' $SLURM_ARRAY_TASK_ID).json"
-RUN_NAME=$(python -c "import json; c=json.load(open('$CONFIG_FILE')); print(c['run_name'])")_${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}
 
-python train_hierarchical.py \\
-    $(python scripts/generate_sweep.py --args-for $SLURM_ARRAY_TASK_ID) \\
+# Build CLI args from the JSON config.
+# Single-quoted values (e.g. JSON strings) are intentional — eval below
+# re-parses the whole command so those quotes are honoured correctly.
+ARGS=$(python - <<EOF
+import json
+cfg = json.load(open("$CONFIG_FILE"))
+parts = []
+bool_flags = {"no_forward_use_predictor"}
+skip = {"run_name", "data_path"}
+for k, v in cfg.items():
+    if k in skip:
+        continue
+    flag = "--" + k.replace("_", "-")
+    if k in bool_flags:
+        if v:
+            parts.append(flag)
+    elif isinstance(v, str) and ("{" in v or "[" in v):
+        parts.append("%s '%s'" % (flag, v))
+    else:
+        parts.append("%s %s" % (flag, v))
+print(" ".join(parts))
+EOF
+)
+
+RUN_NAME=$(python -c "import json; print(json.load(open('$CONFIG_FILE'))['run_name'])")
+RUN_NAME="${RUN_NAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+
+eval python train_hierarchical.py \\
+    --data-path "$DATA" \\
+    --runs-dir "$RESULTS/runs" \\
     --run-name "$RUN_NAME" \\
-    --runs-dir "$RESULTS/runs"
+    $ARGS
 """
 
 
@@ -150,7 +178,7 @@ def write_configs(configs: list, out_dir: Path) -> None:
 
 
 def write_slurm(configs: list, out_path: Path) -> None:
-    header = SLURM_HEADER.format(last_idx=len(configs) - 1)
+    header = SLURM_HEADER.replace("LAST_IDX", str(len(configs) - 1))
     out_path.write_text(header)
     print(f"Wrote SLURM array script to {out_path}")
     print(f"Submit with: sbatch {out_path}")
@@ -208,7 +236,8 @@ if __name__ == "__main__":
         if args.submit:
             result = subprocess.run(
                 ["sbatch", str(slurm_path)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             result.stdout = result.stdout.decode()
             result.stderr = result.stderr.decode()
