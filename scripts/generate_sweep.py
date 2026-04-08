@@ -160,11 +160,21 @@ def print_args_for(configs: list, idx: int) -> None:
     """Print CLI args for a given config index (used by the slurm script)."""
     cfg = dict(configs[idx])
     cfg.pop("run_name", None)
-    # Replace $DATA placeholder — the slurm script handles this via shell expansion
+    parts = []
+    bool_flags = {"no_forward_use_predictor"}
     for k, v in cfg.items():
         if isinstance(v, str):
-            cfg[k] = v.replace("$DATA", "${DATA}")
-    print(_config_to_args(cfg))
+            v = v.replace("$DATA", "${DATA}")
+        flag = "--" + k.replace("_", "-")
+        if k in bool_flags:
+            if v:
+                parts.append(flag)
+        elif isinstance(v, str) and (" " in v or "{" in v or "[" in v):
+            parts.append("%s '%s'" % (flag, v))
+        else:
+            parts.append("%s %s" % (flag, v))
+    # Use a plain space join — backslash-newline breaks inside $(...) capture
+    print(" ".join(parts))
 
 
 if __name__ == "__main__":
