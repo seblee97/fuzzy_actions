@@ -19,10 +19,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 FIXED = {
-    "data_path":       "$DATA",
-    "dataset_class":   "pair_datasets.PhaseTransitionPairDataset",
-    "dataset_kwargs":  '{"state_mode":"pixel","pixel_style":"game","obs_cell_size":32,"resize_obs":[84,84]}',
-    "encoder_mode":    "pixel",
+    "data_path": "$DATA",
+    "dataset_class": "pair_datasets.PhaseTransitionPairDataset",
+    "dataset_kwargs": '{"state_mode":"pixel","pixel_style":"game","obs_cell_size":32,"resize_obs":[84,84]}',
+    "encoder_mode": "pixel",
     "inverse_loss_type": "infonce",
     "forward_loss_type": "mse",
     "prior_loss_type": "mse",
@@ -30,12 +30,12 @@ FIXED = {
     "no_forward_use_predictor": True,
     "enc_reg_loss_type": "vicreg_var",
     "vicreg_target_std": 0.1,
-    "z_noise_std":     0.1,
-    "epochs":          100,
-    "batch_size":      256,
-    "num_workers":     8,
-    "log_frequency":   50,
-    "save_frequency":  10,
+    "z_noise_std": 0.1,
+    "epochs": 100,
+    "batch_size": 256,
+    "num_workers": 8,
+    "log_frequency": 50,
+    "save_frequency": 10,
     "shuffle_test_frequency": 500,
 }
 
@@ -48,13 +48,14 @@ GRID = {
         '{"forward": {"updates": ["inverse", "forward", "forward_loss"], "stop_grad": ["x1", "x2"]}, "inverse": {"stop_grad": ["keys"]}}',
     ],
     "w_enc_reg": [10.0, 25.0, 50.0],
-    "w_forward":  [0.1, 0.5, 1.0],
-    "z_dim":      [32, 128],
+    "w_forward": [0.1, 0.5, 1.0],
+    "z_dim": [32, 128],
 }
 
 # ---------------------------------------------------------------------------
 # Config generation
 # ---------------------------------------------------------------------------
+
 
 def _grid_configs() -> list[dict]:
     keys = list(GRID.keys())
@@ -170,10 +171,21 @@ def print_args_for(configs: list[dict], idx: int) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--write", action="store_true", help="write configs and slurm script")
-    p.add_argument("--submit", action="store_true", help="write configs + slurm script, then sbatch")
-    p.add_argument("--args-for", type=int, default=None, metavar="IDX",
-                   help="print CLI args for config IDX (used internally by slurm)")
+    p.add_argument(
+        "--write", action="store_true", help="write configs and slurm script"
+    )
+    p.add_argument(
+        "--submit",
+        action="store_true",
+        help="write configs + slurm script, then sbatch",
+    )
+    p.add_argument(
+        "--args-for",
+        type=int,
+        default=None,
+        metavar="IDX",
+        help="print CLI args for config IDX (used internally by slurm)",
+    )
     args = p.parse_args()
 
     configs = _grid_configs()
@@ -186,7 +198,9 @@ if __name__ == "__main__":
         write_configs(configs, scripts_dir / "sweep_configs")
         write_slurm(configs, slurm_path)
         if args.submit:
-            result = subprocess.run(["sbatch", str(slurm_path)], capture_output=True, text=True)
+            result = subprocess.run(
+                ["sbatch", str(slurm_path)], capture_output=True, text=True
+            )
             print(result.stdout.strip())
             if result.returncode != 0:
                 print(result.stderr.strip())
