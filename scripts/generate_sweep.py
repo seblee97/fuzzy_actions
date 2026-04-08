@@ -137,7 +137,7 @@ python train_hierarchical.py \\
 """
 
 
-def write_configs(configs: list[dict], out_dir: Path) -> None:
+def write_configs(configs: list, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, cfg in enumerate(configs):
         name = _config_name(cfg, i)
@@ -149,14 +149,14 @@ def write_configs(configs: list[dict], out_dir: Path) -> None:
     print(f"Wrote {len(configs)} configs to {out_dir}/")
 
 
-def write_slurm(configs: list[dict], out_path: Path) -> None:
+def write_slurm(configs: list, out_path: Path) -> None:
     header = SLURM_HEADER.format(last_idx=len(configs) - 1)
     out_path.write_text(header)
     print(f"Wrote SLURM array script to {out_path}")
     print(f"Submit with: sbatch {out_path}")
 
 
-def print_args_for(configs: list[dict], idx: int) -> None:
+def print_args_for(configs: list, idx: int) -> None:
     """Print CLI args for a given config index (used by the slurm script)."""
     cfg = dict(configs[idx])
     cfg.pop("run_name", None)
