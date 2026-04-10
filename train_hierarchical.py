@@ -163,8 +163,9 @@ class Config:
     batch_size: int = 256
     seed: int = 42
 
-    # --- data fraction ---
+    # --- data fraction / split ---
     data_fraction: float = 1.0
+    test_fraction: float = 0.1   # held-out fraction for forward model evaluation
 
     # --- gradient flow ---
     # JSON string controlling per-loss gradient flow; empty string = defaults.
@@ -319,9 +320,11 @@ def parse_args() -> Config:
     p.add_argument("--batch-size", type=int, default=cfg.batch_size)
     p.add_argument("--seed", type=int, default=cfg.seed)
 
-    # data fraction
+    # data fraction / split
     p.add_argument("--data-fraction", type=float, default=cfg.data_fraction,
                    metavar="F", help="fraction of dataset to use, 0 < F ≤ 1")
+    p.add_argument("--test-fraction", type=float, default=cfg.test_fraction,
+                   metavar="F", help="fraction of dataset held out for test eval (0=disabled)")
 
     # logging
     p.add_argument("--run-name", default=cfg.run_name)
@@ -374,6 +377,7 @@ def parse_args() -> Config:
     cfg.batch_size            = args.batch_size
     cfg.seed                  = args.seed
     cfg.data_fraction         = args.data_fraction
+    cfg.test_fraction         = args.test_fraction
     cfg.run_name              = args.run_name
     cfg.runs_dir              = args.runs_dir
     cfg.save_frequency        = args.save_frequency
@@ -553,16 +557,31 @@ def train(cfg: Config) -> None:
     # Dataset
     base_dataset = load_dataset(cfg)
 
+    import random as _random
+    from torch.utils.data import Subset
+
+    n_full = len(base_dataset)
+
     if cfg.data_fraction < 1.0:
-        import random as _random
-        from torch.utils.data import Subset
-        n_full = len(base_dataset)
         n_keep = max(1, int(n_full * cfg.data_fraction))
-        indices = _random.Random(cfg.seed).sample(range(n_full), n_keep)
-        dataset = Subset(base_dataset, indices)
-        print(f"Using {n_keep:,} / {n_full:,} samples ({cfg.data_fraction:.1%})")
+        all_indices = _random.Random(cfg.seed).sample(range(n_full), n_keep)
     else:
-        dataset = base_dataset
+        all_indices = list(range(n_full))
+
+    # Train/test split
+    if cfg.test_fraction > 0.0:
+        n_test = max(1, int(len(all_indices) * cfg.test_fraction))
+        rng = _random.Random(cfg.seed)
+        rng.shuffle(all_indices)
+        test_indices  = all_indices[:n_test]
+        train_indices = all_indices[n_test:]
+        dataset      = Subset(base_dataset, train_indices)
+        test_dataset = Subset(base_dataset, test_indices)
+        print(f"Train: {len(train_indices):,}  |  Test: {len(test_indices):,}  (of {n_full:,} total)")
+    else:
+        dataset      = Subset(base_dataset, all_indices) if cfg.data_fraction < 1.0 else base_dataset
+        test_dataset = None
+        print(f"Dataset: {n_full:,} samples (no test split)")
 
     loader = DataLoader(
         dataset,
@@ -572,7 +591,15 @@ def train(cfg: Config) -> None:
         pin_memory=device.type == "cuda",
         drop_last=True,
     )
-    print(f"Dataset: {len(dataset):,} samples  |  {len(loader):,} batches/epoch")
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
+    ) if test_dataset is not None else None
+    print(f"Train batches/epoch: {len(loader):,}")
     save_sample_frames(base_dataset, run_dir, seed=cfg.seed)
 
     # Auto-detect input shape from dataset
@@ -871,6 +898,52 @@ def train(cfg: Config) -> None:
             f"({elapsed:.1f}s)"
         )
         _log("epoch", epoch + 1, {k: v / n for k, v in epoch_losses.items()})
+
+        # --- Test evaluation (forward model only) ---
+        if test_loader is not None and not isinstance(forward_loss_fn, NullForwardLoss):
+            for m in modules_dict.values():
+                m.eval()
+            test_fwd_loss = 0.0
+            test_shuf_loss = 0.0
+            n_test_batches = 0
+            test_s1_key = test_s2_key = None
+            with torch.no_grad():
+                for test_batch in test_loader:
+                    if test_s1_key is None:
+                        keys = set(test_batch.keys())
+                        if "s1" in keys:
+                            test_s1_key, test_s2_key = "s1", "s2"
+                        else:
+                            test_s1_key, test_s2_key = "s1_a", "s2_a"
+                    ts1 = test_batch[test_s1_key].to(device, non_blocking=True)
+                    ts2 = test_batch[test_s2_key].to(device, non_blocking=True)
+                    tn  = test_batch.get("n_a", test_batch.get("n"))
+                    if tn is not None:
+                        tn = tn.to(device, non_blocking=True)
+                    tx1 = encoder(ts1)
+                    tx2 = encoder(ts2)
+                    tz  = inverse(tx1, tx2)
+                    tx2_pred = forward_model(tx1, tz, context=tn)
+                    fwd_slot = grad_cfg.forward
+                    test_fwd_loss  += forward_loss_fn(tx2_pred, tx2, stop_grad=fwd_slot.stop_grad).item()
+                    tz_shuf = tz[torch.randperm(tz.shape[0], device=device)]
+                    test_shuf_loss += forward_loss_fn(
+                        forward_model(tx1, tz_shuf, context=tn), tx2, stop_grad=fwd_slot.stop_grad
+                    ).item()
+                    n_test_batches += 1
+            test_fwd_loss  /= n_test_batches
+            test_shuf_loss /= n_test_batches
+            test_sensitivity = (test_shuf_loss - test_fwd_loss) / (test_fwd_loss + 1e-8)
+            _log("test", epoch + 1, {
+                "loss_fwd":      test_fwd_loss,
+                "loss_fwd_shuf": test_shuf_loss,
+                "z_sensitivity": test_sensitivity,
+            })
+            print(
+                f"  [test] fwd={test_fwd_loss:.4f}  "
+                f"fwd_shuf={test_shuf_loss:.4f}  "
+                f"z_sensitivity={test_sensitivity:+.3f}"
+            )
 
         if cfg.save_frequency > 0 and (epoch + 1) % cfg.save_frequency == 0:
             save_checkpoint(
